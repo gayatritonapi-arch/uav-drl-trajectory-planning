@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+
+# Training artifacts (Weeks 5-8 onward) — large/binary, don't commit by default
+*.zip
+tensorboard_logs/
+checkpoints/
+*.pt
+*.pth
+
+# Keep generated result plots out of version control if you prefer a clean diff;
+# comment the next two lines out if you'd rather track them for the report
+# results/*.png
