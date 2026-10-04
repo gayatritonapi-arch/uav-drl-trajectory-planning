@@ -1,0 +1,5 @@
+method,fuel_kg,fuel_vs_DP_pct,flight_time_min,decisions,reached_goal,nfz_violation_steps,max_nfz_penetration_km,ms_per_decision,dp_solve_s
+Naive,1050.3,+39.2,11.3,136,True,36,4.99,0.002,
+DP,754.4,+0.0,12.2,49,True,0,0.00,nan,29.6
+SAC,526.7,-30.2,13.7,164,True,0,0.00,0.324,
+DDPG,598.8,-20.6,13.8,165,True,0,0.00,0.233,

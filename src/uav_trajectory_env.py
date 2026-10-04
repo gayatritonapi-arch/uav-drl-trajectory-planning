@@ -11,6 +11,15 @@ Implements:
   - MDP formulation: state, action, reward, termination
 
 This is the Week 1-2 deliverable from the 12-week implementation plan.
+
+v1.1 changes (made during Step 3, DRL training):
+  - OpenAP `enroute()` expects true airspeed in KNOTS; v1.0 passed m/s. This
+    units bug is what made high-altitude cruise look *more* expensive than
+    low altitude (the "documented limitation" in v1.0). Fixed: tas * 1.94384.
+  - Fuel model now uses the ACTUAL vertical speed after altitude limits, and
+    includes acceleration (`acc`) so speeding up costs fuel.
+  - Altitude floor is now a minimum safe altitude (default 500 m, matching the
+    DP baseline's lowest level) instead of 0 m, and the ceiling is 12,000 m.
 Run this file directly to sanity-check the environment and view a
 random-policy trajectory plot.
 """
@@ -44,6 +53,8 @@ class UAVTrajectoryEnv(gym.Env):
         start_alt: float = 500.0,      # m
         goal_pos: tuple = (150_000.0, 0.0),   # 150 km away
         cruise_alt: float = 10_000.0,  # m, target cruise altitude
+        min_alt: float = 500.0,        # m, minimum safe altitude (v1.1; was 0 = ground)
+        max_alt: float = 12_000.0,     # m, service ceiling (A320 ~ 12,000 m)
         initial_mass: float = 60_000.0,  # kg
         no_fly_zones: list | None = None,   # list of (cx, cy, radius)
         wind_vector: tuple = (15.0, 0.0),   # m/s, constant wind (can randomize)
@@ -64,6 +75,8 @@ class UAVTrajectoryEnv(gym.Env):
         self.start_alt = start_alt
         self.goal_pos = np.array(goal_pos, dtype=np.float32)
         self.cruise_alt = cruise_alt
+        self.min_alt = min_alt
+        self.max_alt = max_alt
         self.initial_mass = initial_mass
         self.no_fly_zones = no_fly_zones or [
             (60_000.0, 8_000.0, 12_000.0),   # (center_x, center_y, radius) in meters
@@ -128,22 +141,31 @@ class UAVTrajectoryEnv(gym.Env):
 
         # ---- Point-mass kinematics update ----
         self.heading += heading_rate * self.dt
+        self.heading = (self.heading + np.pi) % (2 * np.pi) - np.pi   # v1.1: keep in [-pi, pi]
         ground_vx = self.velocity * np.cos(self.heading) + self.wind_vector[0]
         ground_vy = self.velocity * np.sin(self.heading) + self.wind_vector[1]
         self.pos += np.array([ground_vx, ground_vy]) * self.dt
-        self.alt = np.clip(self.alt + climb_rate * self.dt, 0.0, 15_000.0)
+        prev_alt = self.alt
+        self.alt = float(np.clip(self.alt + climb_rate * self.dt, self.min_alt, self.max_alt))
+        # v1.1 fix: use the ACTUAL vertical speed after altitude limits. Previously the
+        # commanded climb rate was passed to the fuel model even when the aircraft was
+        # pinned at the altitude floor, so a DRL agent learned to "descend into the
+        # ground" forever at near-idle fuel flow (reward hacking found in Step 3).
+        actual_vs = (self.alt - prev_alt) / self.dt
 
         # simple speed response: throttle nudges airspeed toward a throttle-dependent target
         target_speed = 100.0 + throttle * 150.0
+        prev_v = self.velocity
         self.velocity += (target_speed - self.velocity) * 0.1
+        accel = (self.velocity - prev_v) / self.dt   # v1.1: accelerating now costs fuel
 
         # ---- Fuel burn via OpenAP ----
-        vs_fpm_equivalent = climb_rate  # m/s vertical speed, OpenAP expects m/s here
         fuel_flow = self.fuelflow_model.enroute(
             mass=self.mass,
-            tas=self.velocity,
-            alt=self.alt * 3.28084,      # OpenAP expects feet
-            vs=vs_fpm_equivalent * 196.85,  # m/s -> ft/min
+            tas=self.velocity * 1.94384,   # OpenAP expects knots
+            alt=self.alt * 3.28084,        # OpenAP expects feet
+            vs=actual_vs * 196.85,         # m/s -> ft/min
+            acc=accel,                     # m/s^2
         )
         fuel_burned = float(fuel_flow) * self.dt
         fuel_burned = max(fuel_burned, 0.0)

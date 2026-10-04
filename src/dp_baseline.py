@@ -29,15 +29,23 @@ Key difference vs. the DRL formulation
   exactly the limitation DRL is meant to address for the "adaptive,
   real-time" claim in the project.
 
+v1.1 changes (made during Step 3)
+---------------------------------
+- OpenAP expects TAS in knots; v1.0 passed m/s. Fixed (cruise_speed * 1.94384).
+  This is what made the v1.0 DP stay at 500 m: with the bug, altitude looked
+  more expensive. With correct units, high-altitude cruise is cheaper.
+- Climb/descent transitions are now limited to the RL env's 15 m/s, and the
+  altitude grid is finer (~198 m) so that limit is representable.
+- No end-of-route altitude requirement by default (matches the RL env).
+
 Simplifying assumptions (documented, not hidden)
 --------------------------------------------------
 - Constant cruise speed and constant mass assumed while evaluating each
   segment's fuel flow (the DRL point-mass environment models these more
   dynamically). This keeps the DP tractable on a coarse grid.
-- The lateral/altitude grid is coarse for runtime tractability; climb
-  rates implied by adjacent-layer altitude jumps are idealized, not
-  hard-constrained to the same max climb rate used in the RL environment.
-  Refine the grid resolution if you need tighter physical realism.
+- The lateral grid is coarse (5 km bins) for runtime tractability, so DP
+  paths are piecewise-linear and can pass slightly wider of zones than needed.
+- DP flies at one fixed airspeed (220 m/s); the DRL agent can also choose speed.
 """
 
 import numpy as np
@@ -54,10 +62,12 @@ class DPTrajectoryBaseline:
         n_x_layers: int = 50,
         y_range: tuple = (-30_000.0, 30_000.0),
         n_y_bins: int = 13,
-        alt_levels: tuple = (500, 2000, 3500, 5000, 6500, 8000, 10000),
+        alt_levels: tuple = tuple(np.linspace(500, 10_000, 49)),  # v1.1: ~198 m spacing
         cruise_speed: float = 220.0,   # m/s, constant-speed assumption for DP
         max_y_jump_bins: int = 1,      # lateral maneuverability per x-step
         max_alt_jump_levels: int = 1,  # climb/descent maneuverability per x-step
+        max_vs: float = 15.0,          # v1.1: m/s, same max climb/descent rate as the RL env
+        terminal_alt: float | None = None,  # v1.1: None = no end-altitude requirement (as in RL env)
     ):
         self.env = env
         self.aircraft = env.aircraft_props
@@ -65,6 +75,8 @@ class DPTrajectoryBaseline:
         self.no_fly_zones = env.no_fly_zones
         self.mass = env.initial_mass
         self.cruise_speed = cruise_speed
+        self.max_vs = max_vs
+        self.terminal_alt = terminal_alt
 
         self.goal_x = float(env.goal_pos[0])
         self.goal_y = float(env.goal_pos[1])
@@ -110,7 +122,8 @@ class DPTrajectoryBaseline:
         vs_ft_min = vs_m_s * 196.85
         alt_ft = ((alt1 + alt2) / 2.0) * 3.28084
         fuel_flow = self.fuelflow_model.enroute(
-            mass=self.mass, tas=self.cruise_speed, alt=alt_ft, vs=vs_ft_min
+            mass=self.mass, tas=self.cruise_speed * 1.94384,  # v1.1: OpenAP expects knots
+            alt=alt_ft, vs=vs_ft_min
         )
         return max(float(fuel_flow) * dt, 0.0)
 
@@ -133,7 +146,7 @@ class DPTrajectoryBaseline:
                 y_val = self.y_grid[j]
                 alt_val = self.alt_levels[k]
                 lateral_err = abs(y_val - self.goal_y)
-                alt_err = abs(alt_val - self.start_alt)  # descend back near start alt
+                alt_err = 0.0 if self.terminal_alt is None else abs(alt_val - self.terminal_alt)
                 V[last, j, k] = 0.02 * lateral_err + 0.05 * alt_err
 
         # ---- Backward recursion ----
@@ -157,6 +170,9 @@ class DPTrajectoryBaseline:
 
                             if self._segment_intersects_no_fly_zone((x1, y1), (x2, y2)):
                                 continue  # hard constraint: forbidden transition
+                            seg_t = np.hypot(x2 - x1, y2 - y1) / self.cruise_speed
+                            if abs(alt2 - alt1) > self.max_vs * seg_t + 1e-6:
+                                continue  # v1.1: climb/descent-rate limit (same as RL env)
 
                             seg_cost = self._segment_fuel_cost(x1, y1, alt1, x2, y2, alt2)
                             total_cost = seg_cost + V[i + 1, jn, kn]
@@ -239,7 +255,7 @@ if __name__ == "__main__":
     print("\nSaved plot to dp_baseline_trajectory.png")
 
     print(f"\n--- Comparison so far ---")
-    print(f"Naive scripted policy (Step 1, flies THROUGH no-fly zones): ~1252 kg fuel, 0 zones avoided")
+    print(f"Naive scripted policy (Step 1, flies THROUGH no-fly zones): ~1050 kg fuel (v1.1 env), 0 zones avoided")
     print(f"DP baseline (Step 2, hard-avoids no-fly zones):             {total_fuel:.0f} kg fuel, {violations} violations")
     print("Note: not a fully fair comparison yet -- the naive policy ignored constraints entirely.")
     print("The real comparison will be: trained DRL agent vs. this DP baseline (Weeks 9-10).")

@@ -2,3 +2,7 @@ gymnasium>=0.29
 numpy>=1.24
 matplotlib>=3.7
 openap>=1.5
+stable-baselines3>=2.3
+torch>=2.1
+pandas>=2.0
+tensorboard>=2.14
